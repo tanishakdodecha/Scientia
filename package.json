@@ -1,0 +1,30 @@
+{
+  "name": "scientia",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "index": "tsx scripts/build-index.ts",
+    "build": "npm run index && next build",
+    "start": "next start",
+    "pipeline": "tsx scripts/pipeline.ts"
+  },
+  "dependencies": {
+    "@mozilla/readability": "^0.5.0",
+    "better-sqlite3": "^11.5.0",
+    "jsdom": "^25.0.1",
+    "next": "^15.3.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "rss-parser": "^3.13.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/jsdom": "^21.1.7",
+    "@types/node": "^22.10.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}
