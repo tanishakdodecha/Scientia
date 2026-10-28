@@ -1,0 +1,51 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import Link from "next/link";
+
+const base = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
+
+type Row = { slug: string; title: string; dek: string; tags: string[]; storyDate: string };
+
+export default function SearchPage() {
+  const [q, setQ] = useState("");
+  const [rows, setRows] = useState<Row[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    setQ(new URLSearchParams(window.location.search).get("q") ?? "");
+    fetch(`${base}/search-index.json`)
+      .then((r) => r.json())
+      .then((data: Row[]) => setRows(data))
+      .catch(() => setRows([]))
+      .finally(() => setLoading(false));
+  }, []);
+
+  const query = q.trim().toLowerCase();
+  const hits = query
+    ? rows.filter((r) => `${r.title} ${r.dek} ${r.tags.join(" ")}`.toLowerCase().includes(query))
+    : [];
+
+  return (
+    <main className="wrap">
+      <h1 className="page-title">{query ? `“${q}”` : "Search"}</h1>
+      {loading ? <p className="page-sub">Loading…</p> : null}
+      {!loading && query && hits.length === 0 ? <p className="page-sub">Nothing found.</p> : null}
+      {hits.map((r) => (
+        <Link key={r.slug} href={`/article/${r.slug}/`} className="result">
+          <h2>{r.title}</h2>
+          <p>{r.dek}</p>
+          <div className="meta">
+            <span>
+              {new Date(r.storyDate).toLocaleDateString("en-GB", {
+                day: "numeric",
+                month: "short",
+                year: "numeric",
+              })}
+            </span>
+          </div>
+        </Link>
+      ))}
+    </main>
+  );
+}
