@@ -1,0 +1,303 @@
+import { complete, completeJSON } from "./llm";
+import { extractArticle } from "./extract";
+import { fetchAllItems, type NewsItem } from "./rss";
+import {
+  insertRawItems,
+  markRawItemUsed,
+  saveTerm,
+  upsertStory,
+  type KeyTerm,
+  type SourceLink,
+} from "./db";
+import { countWords, slugify } from "./text";
+
+type Cluster = { clusterTitle: string; topicTags: string[]; itemIds: number[] };
+
+type ArticleJSON = {
+  title: string;
+  dek: string;
+  body: string;
+  tags: string[];
+  key_terms: KeyTerm[];
+  sources_used: string[];
+};
+
+const CLUSTER_SYSTEM = `You are a senior news editor. Group raw headlines into distinct news stories.
+Return STRICT JSON only. No commentary.`;
+
+function clusterPrompt(items: NewsItem[], maxStories: number): string {
+  const lines = items.map((i) => `[${i.id}] (${i.source}) ${i.title} — ${i.summary.slice(0, 140)}`);
+  return `Group the items below into at most ${maxStories} distinct, important news stories.
+
+Rules:
+- Each story needs 2–5 items describing the SAME event or situation.
+- Split big stories when one event has independently new developments.
+- Do not use an item id twice. Skip trivial items.
+- Only use ids that appear in the list.
+
+Items:
+${lines.join("\n")}
+
+Return JSON exactly:
+{"stories":[{"clusterTitle":"short working title","topicTags":["Tag"],"itemIds":[1,2]}]}`;
+}
+
+async function clusterItems(items: NewsItem[], maxStories: number): Promise<Cluster[]> {
+  if (!items.length) return [];
+  const result = await completeJSON<{ stories: Cluster[] }>(CLUSTER_SYSTEM, clusterPrompt(items, maxStories), {
+    temperature: 0,
+    maxTokens: 3000,
+  });
+
+  const used = new Set<number>();
+  const clusters: Cluster[] = [];
+  for (const c of result.stories ?? []) {
+    const ids = (c.itemIds ?? [])
+      .filter((id) => items.some((i) => i.id === id) && !used.has(id))
+      .slice(0, 5);
+    if (ids.length < 2) continue;
+    ids.forEach((id) => used.add(id));
+    clusters.push({
+      clusterTitle: c.clusterTitle ?? "Story",
+      topicTags: (c.topicTags ?? []).slice(0, 5),
+      itemIds: ids,
+    });
+    if (clusters.length >= maxStories) break;
+  }
+  console.log(`[cluster] ${clusters.length} stories`);
+  return clusters;
+}
+
+const WRITER_SYSTEM = `You are a working journalist writing for a serious newspaper magazine — a piece that appears once, in print, under your own name. You write for an intelligent reader who knows almost nothing about the subject.
+
+VOICE
+- Plain English, roughly 8th-grade vocabulary. Short, clean sentences. Active voice.
+- Your name is on every line. Write like a specific person with judgment, not like a committee.
+- Self-contained: explain every person, institution, place and acronym the first time it appears.
+- Detailed: 1,200–1,600 words. Depth comes from explanation and specifics, not length or jargon.
+
+THE THREE PARTS — each does one job:
+1. TITLE — a plain news headline about the actual event (max 14 words). Never meta, never editorial. Banned in titles: "explained", "explainer", "what you need to know", "a beginner's guide", "why it matters", "understanding", "the story of".
+2. DEK — exactly 2 sentences summarizing the news itself: what happened, and where things stand now. Plain facts only.
+3. BODY — the explanation itself, so the reader finishes able to explain the topic to someone else.
+
+BODY CRAFT
+- Open on the most concrete new fact: a named person, a place, a day, a decision, a number.
+- Choose 2–4 descriptive headings that fit THIS story ("How we got here", "The sticking points"). Do not reuse the same skeleton every time. If the piece flows best without headings, use none.
+- Paragraphs of 1 to 5 sentences. Vary the rhythm: at least five sentences under 8 words across the piece.
+- Use the exact wording your sources use when it matters. Quote a real line when it is worth quoting, and attribute it.
+- When you use a number, place it in context ("about a quarter of the world's shipments").
+- Finish on a concrete next step, date, or decision. Never recap.
+
+HARD RULES
+1. Facts come ONLY from the SOURCE MATERIAL. Never invent numbers, names, dates, quotes or context. If sources disagree: "Accounts differ:" and present both neutrally.
+2. Never write "the sources", "the report", "this article". Never use these words anywhere: delve, underscore, highlight, landscape, tapestry, testament, multifaceted, crucial, pivotal, holistic, robust, foster, leverage, navigate, amid, moreover, furthermore, additionally, overall, ultimately, in conclusion, it is important to note, it is worth noting, when it comes to, plays a vital role, in the wake of, against the backdrop of, sheds light on, only time will tell, game-changer, ever-evolving.
+3. No rhetorical questions. No addressing the reader as "you". No hype.
+4. Explain any term the moment you use it, in a short clause in the same sentence.
+
+Return STRICT JSON only:
+{"title":"","dek":"","body":"","tags":[],"key_terms":[{"term":"","definition":"","example":""}],"sources_used":[""]}`;
+
+function writerPrompt(cluster: Cluster, material: NewsItem[], texts: Map<number, string>): string {
+  const blocks = material.map((m, idx) => {
+    const text = texts.get(m.id) ?? m.summary;
+    return `SOURCE [${idx + 1}] — ${m.source}
+URL: ${m.link}
+TITLE: ${m.title}
+TEXT: ${text}`;
+  });
+
+  return `Write the article from the source material below.
+
+- title: a plain news headline about the event itself (max 14 words, no meta words).
+- dek: exactly 2 sentences — a factual summary (what happened / where it stands).
+- body: 1,200–1,600 words, written as one confident journalist would write this one story.
+- tags: 3–5 short topic labels.
+- key_terms: 6–8 words a reader might not know, each with a one-sentence definition and an example.
+- sources_used: the URLs that actually contributed facts.
+
+SOURCE MATERIAL:
+${blocks.join("\n\n---\n\n")}
+
+Working title from the desk: "${cluster.clusterTitle}"
+Suggested topics: ${cluster.topicTags.join(", ") || "(none)"}
+
+Return STRICT JSON only:
+{"title":"","dek":"","body":"","tags":[],"key_terms":[{"term":"","definition":"","example":""}],"sources_used":[""]}`;
+}
+
+const EDITOR_SYSTEM = `You are a demanding newspaper editor. Your correspondent filed a competent draft, but parts still read like machine-written prose.
+
+Rewrite so it reads like it was written by one thoughtful human being. Keep every fact identical — nothing added, nothing softened.
+
+Fix especially:
+- Summaries where the draft should just report what happened.
+- Even sentence length: keep at least five sentences under 8 words across the piece.
+- Any leftover filler words (delve, underscore, highlight, crucial, navigate, landscape, moreover, ultimately). Delete them.
+- Template headings: change the words or remove the heading if it earns nothing.
+- The ending: land on a concrete next step, date, or decision — not a recap.
+
+Return the corrected article as STRICT JSON with the SAME keys.`;
+
+function editorPrompt(draft: ArticleJSON, material: NewsItem[], texts: Map<number, string>): string {
+  const refs = material
+    .map((m) => `- ${m.title} (${m.link}): ${(texts.get(m.id) ?? m.summary).slice(0, 2000)}`)
+    .join("\n");
+  return `DRAFT TO REWRITE
+${JSON.stringify(draft, null, 2)}
+
+SOURCE FACTS (keep the writing grounded; do not add new facts):
+${refs}`;
+}
+
+const CHECKER_SYSTEM = `You are a strict fact-checker. Find statements in the ARTICLE that are not supported by the SOURCE MATERIAL. Return STRICT JSON only.`;
+
+function checkerPrompt(article: string, material: NewsItem[], texts: Map<number, string>): string {
+  const src = material
+    .map((m) => `- ${m.title} (${m.link}): ${(texts.get(m.id) ?? m.summary).slice(0, 3500)}`)
+    .join("\n");
+  return `SOURCE MATERIAL:
+${src}
+
+ARTICLE:
+${article}
+
+List every claim that adds information absent from the SOURCE MATERIAL.
+{"supported":true/false,"problems":["..."]}
+If grounded: {"supported":true,"problems":[]}`;
+}
+
+async function gatherTexts(material: NewsItem[]): Promise<Map<number, string>> {
+  const texts = new Map<number, string>();
+  for (const m of material) {
+    texts.set(m.id, await extractArticle(m.link, m.summary));
+    markRawItemUsed(m.link);
+  }
+  return texts;
+}
+
+export async function runPipeline(): Promise<void> {
+  const started = Date.now();
+  const numStories = Number(process.env.NUM_STORIES ?? 8);
+  const hoursBack = Number(process.env.HOURS_BACK ?? 30);
+  const verify = (process.env.VERIFY_SOURCES ?? "true").toLowerCase() !== "false";
+  const editPassEnabled = (process.env.EDIT_PASS ?? "true").toLowerCase() !== "false";
+  const today = new Date().toISOString().slice(0, 10);
+
+  console.log(`\n=== Scientia pipeline ${new Date().toISOString()} ===`);
+
+  const items = await fetchAllItems(hoursBack);
+  if (items.length) {
+    insertRawItems(
+      items.map((i) => ({
+        source: i.source,
+        title: i.title,
+        link: i.link,
+        summary: i.summary,
+        publishedAt: i.publishedAt,
+      }))
+    );
+  }
+
+  const clusters = await clusterItems(items, numStories);
+
+  let written = 0;
+  for (const cluster of clusters) {
+    try {
+      const material = cluster.itemIds
+        .map((id) => items.find((i) => i.id === id))
+        .filter((x): x is NewsItem => Boolean(x))
+        .slice(0, 4);
+      if (material.length < 2) continue;
+
+      const texts = await gatherTexts(material);
+      let draft = await completeJSON<ArticleJSON>(WRITER_SYSTEM, writerPrompt(cluster, material, texts), {
+        temperature: 0.65,
+        maxTokens: 6000,
+      });
+
+      if (editPassEnabled) {
+        try {
+          const edited = await completeJSON<ArticleJSON>(EDITOR_SYSTEM, editorPrompt(draft, material, texts), {
+            temperature: 0.85,
+            maxTokens: 7000,
+          });
+          if (edited?.body) {
+            draft = {
+              ...draft,
+              ...edited,
+              tags: edited.tags?.length ? edited.tags : draft.tags,
+              key_terms: edited.key_terms?.length ? edited.key_terms : draft.key_terms,
+              sources_used: edited.sources_used?.length ? edited.sources_used : draft.sources_used,
+            };
+          }
+        } catch (err) {
+          console.warn(`  [edit] skipped: ${(err as Error).message}`);
+        }
+      }
+
+      if (verify) {
+        const check = await completeJSON<{ supported: boolean; problems: string[] }>(
+          CHECKER_SYSTEM,
+          checkerPrompt(`${draft.title}\n\n${draft.dek}\n\n${draft.body}`, material, texts),
+          { temperature: 0, maxTokens: 1500 }
+        );
+        if (!check.supported && check.problems?.length) {
+          console.log(`  [verify] correcting — ${check.problems.length} issue(s)`);
+          const revised = await completeJSON<ArticleJSON>(
+            WRITER_SYSTEM,
+            `${writerPrompt(cluster, material, texts)}\n\nA review flagged these unsupported statements. Remove or correct them without losing accuracy or voice:\n${check.problems
+              .map((p) => `- ${p}`)
+              .join("\n")}`,
+            { temperature: 0.3, maxTokens: 6000 }
+          );
+          if (revised?.body) draft = revised;
+        }
+      }
+
+      const slug = `${slugify(draft.title)}-${today}`;
+      const body = (draft.body ?? "").trim();
+      const keyTerms = (draft.key_terms ?? []).slice(0, 8).map((k) => ({
+        term: (k.term ?? "").trim(),
+        definition: (k.definition ?? "").trim(),
+        example: (k.example ?? "").trim(),
+      }));
+
+      const wanted = new Set((draft.sources_used ?? []).map((u) => u.trim()));
+      const sources: SourceLink[] = material
+        .filter((m) => wanted.size === 0 || wanted.has(m.link))
+        .map((m) => ({ name: m.source, url: m.link }));
+
+      upsertStory({
+        slug,
+        title: (draft.title ?? "").trim(),
+        dek: (draft.dek ?? "").trim().replace(/\s+/g, " ").slice(0, 280),
+        body,
+        tags: (draft.tags ?? []).slice(0, 5).map((t) => t.trim()),
+        keyTerms,
+        sources,
+        storyDate: today,
+        wordCount: countWords(body),
+        createdAt: new Date().toISOString(),
+      });
+
+      for (const k of keyTerms) {
+        if (!k.term || !k.definition) continue;
+        saveTerm({
+          term: k.term,
+          definition: k.definition,
+          example: k.example,
+          storySlug: slug,
+          storyDate: today,
+        });
+      }
+
+      written++;
+      console.log(`  [${written}/${clusters.length}] ${draft.title}`);
+    } catch (err) {
+      console.warn(`  [skip] ${(err as Error).message}`);
+    }
+  }
+
+  console.log(`=== done: ${written} articles in ${Math.round((Date.now() - started) / 1000)}s ===\n`);
+}
