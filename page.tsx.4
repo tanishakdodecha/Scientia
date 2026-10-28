@@ -1,0 +1,71 @@
+import Link from "next/link";
+import { listTerms } from "@/lib/db";
+import { funFact, onThisDay } from "@/lib/words";
+
+function shortDate(d: string) {
+  return new Date(d).toLocaleDateString("en-GB", { day: "2-digit", month: "short" }).split(" ");
+}
+
+export default async function LearnPage() {
+  const terms = listTerms(200);
+  const fact = await funFact();
+  const events = await onThisDay();
+
+  return (
+    <main className="wrap">
+      <h1 className="page-title">Learn</h1>
+
+      <div className="learn-grid">
+        <div>
+          <div className="learn-card dark">
+            <h2>Curiosity</h2>
+            <div className="def">{fact}</div>
+          </div>
+
+          <div className="learn-card">
+            <h2>On this day</h2>
+            {events.length === 0 ? (
+              <p className="page-sub" style={{ marginBottom: 0 }}>Nothing loaded (offline is fine).</p>
+            ) : (
+              <ul className="fact-list">
+                {events.slice(0, 5).map((e, i) => (
+                  <li key={i}>
+                    <b>{e.year}</b> — {e.text}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+
+        <div>
+          <div className="learn-card">
+            <h2>Words you have met</h2>
+            {terms.length === 0 ? (
+              <p className="page-sub">
+                Run <code>npm run pipeline</code> and every key term from your stories builds up here.
+              </p>
+            ) : (
+              <ul className="term-list">
+                {terms.map((t, i) => (
+                  <li key={`${t.term}-${i}`}>
+                    <div className="term-date">
+                      <span>{shortDate(t.storyDate)[0]}</span>
+                      <span>{shortDate(t.storyDate)[1]}</span>
+                    </div>
+                    <div>
+                      <Link href={t.storySlug ? `/article/${t.storySlug}/` : "/learn"}>
+                        <span className="n">{t.term}</span>
+                        <span className="d">{t.definition}</span>
+                      </Link>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+      </div>
+    </main>
+  );
+}
