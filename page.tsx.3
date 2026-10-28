@@ -1,0 +1,48 @@
+import Link from "next/link";
+import { listStories } from "@/lib/db";
+import { allTags } from "@/lib/related";
+import { dateLine } from "@/lib/text";
+
+function slugTag(t: string) {
+  return t.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+}
+
+export function generateStaticParams() {
+  return allTags(listStories(300)).map((t) => ({ tag: slugTag(t.tag) }));
+}
+
+export default async function TopicPage({ params }: { params: Promise<{ tag: string }> }) {
+  const { tag } = await params;
+  const all = listStories(300);
+  const decoded = allTags(all).find((t) => slugTag(t.tag) === tag)?.tag ?? tag;
+  const stories = all.filter((s) => s.tags.some((t) => slugTag(t) === tag));
+
+  return (
+    <main className="wrap">
+      <h1 className="page-title">{decoded}</h1>
+
+      {stories.length === 0 ? (
+        <p className="page-sub">Nothing under this topic yet.</p>
+      ) : (
+        <div className="story-list">
+          {stories.map((s, i) => (
+            <div key={s.slug} className="story-row">
+              <Link href={`/article/${s.slug}/`} className="story-row-link">
+                <span className="idx">{String(i + 1).padStart(2, "0")}</span>
+                <div>
+                  <h2>{s.title}</h2>
+                  <p>{s.dek}</p>
+                  <div className="meta">
+                    <span>{dateLine(s.storyDate)}</span>
+                    <span className="dot">·</span>
+                    <span>{s.readingMinutes} min read</span>
+                  </div>
+                </div>
+              </Link>
+            </div>
+          ))}
+        </div>
+      )}
+    </main>
+  );
+}
