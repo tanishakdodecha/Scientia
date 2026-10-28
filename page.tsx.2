@@ -1,0 +1,153 @@
+import Link from "next/link";
+import { notFound } from "next/navigation";
+import { getStory, listStories } from "@/lib/db";
+import { findRelated } from "@/lib/related";
+import { dateLine } from "@/lib/text";
+import { SaveButton } from "@/components/SaveButton";
+
+type Block = { type: "h2" | "p"; text: string };
+
+function parseBody(body: string): Block[] {
+  return body
+    .split(/\n\s*\n/)
+    .map((b) => b.trim())
+    .filter(Boolean)
+    .map((b) =>
+      b.startsWith("## ") ? { type: "h2" as const, text: b.slice(3).trim() } : { type: "p" as const, text: b }
+    );
+}
+
+function anchor(heading: string, i: number): string {
+  return `s${i}-${heading.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")}`;
+}
+
+export function generateStaticParams() {
+  return listStories(300).map((s) => ({ slug: s.slug }));
+}
+
+export default async function ArticlePage({ params }: { params: Promise<{ slug: string }> }) {
+  const { slug } = await params;
+  const story = getStory(slug);
+  if (!story) notFound();
+
+  const blocks = parseBody(story.body);
+  const headings = blocks.filter((b) => b.type === "h2");
+  const related = findRelated(story, listStories(300), 4);
+
+  let section = 0;
+  const rendered: React.ReactNode[] = [];
+  for (const b of blocks) {
+    if (b.type === "h2") {
+      section += 1;
+      const id = anchor(b.text, section);
+      rendered.push(
+        <h2 id={id} key={id}>
+          {section > 1 ? <span className="num">{section}.</span> : null}
+          {b.text}
+        </h2>
+      );
+    } else {
+      rendered.push(<p key={rendered.length}>{b.text}</p>);
+    }
+  }
+
+  return (
+    <main className="wrap">
+      <article className="narrow">
+        <div className="article-tools">
+          <SaveButton
+            item={{
+              slug: story.slug,
+              title: story.title,
+              dek: story.dek,
+              storyDate: story.storyDate,
+              readingMinutes: story.readingMinutes,
+              tags: story.tags,
+            }}
+          />
+        </div>
+
+        <h1 className="article-title">{story.title}</h1>
+        {story.dek ? <p className="article-dek">{story.dek}</p> : null}
+
+        <p className="hatnote">
+          Compiled from {story.sources.map((s) => s.name).join(", ")} on {dateLine(story.storyDate)}
+          {" · "}{story.readingMinutes} min read
+          {" · "}Based on {story.sources.length} source{story.sources.length === 1 ? "" : "s"}
+        </p>
+
+        {headings.length >= 2 ? (
+          <nav className="toc">
+            <div className="toc-title">Contents</div>
+            <ol>
+              {headings.map((h, i) => (
+                <li key={h.text}>
+                  <a href={`#${anchor(h.text, i + 1)}`}>{h.text}</a>
+                </li>
+              ))}
+            </ol>
+          </nav>
+        ) : null}
+
+        <div className="body">{rendered}</div>
+
+        <div className="sources">
+          <strong>Sources</strong>
+          <ol style={{ margin: "8px 0 0", paddingLeft: 20 }}>
+            {story.sources.map((s) => (
+              <li key={s.url}>
+                <a href={s.url} target="_blank" rel="noreferrer">
+                  {s.name}
+                </a>
+              </li>
+            ))}
+          </ol>
+        </div>
+
+        {story.keyTerms.length > 0 ? (
+          <section className="words">
+            <span className="lbl">Words in this story</span>
+            <div className="terms">
+              {story.keyTerms.map((k) => (
+                <div key={k.term} className="term">
+                  <b>{k.term}</b>
+                  <small>
+                    {k.definition}
+                    {k.example ? (
+                      <>
+                        <br />
+                        <em>&ldquo;{k.example}&rdquo;</em>
+                      </>
+                    ) : null}
+                  </small>
+                </div>
+              ))}
+            </div>
+          </section>
+        ) : null}
+
+        <section className="readmore">
+          <h2>Related reading</h2>
+          {related.map((r) => (
+            <div key={r.slug} className="rm-item">
+              <h3>
+                <Link href={`/article/${r.slug}/`}>{r.title}</Link>
+              </h3>
+              <p>{r.dek}</p>
+              <div className="reason">{r.reason}</div>
+            </div>
+          ))}
+        </section>
+
+        <div className="categories">
+          <span>Topics</span>
+          {story.tags.map((t) => (
+            <Link key={t} href={`/topic/${t.toLowerCase().replace(/[^a-z0-9]+/g, "-")}/`} className="cat">
+              {t}
+            </Link>
+          ))}
+        </div>
+      </article>
+    </main>
+  );
+}
