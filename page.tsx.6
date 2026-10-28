@@ -1,0 +1,61 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import Link from "next/link";
+import { getSaved, removeSaved, type SavedItem } from "@/lib/bookmarks";
+
+export default function SavedPage() {
+  const [items, setItems] = useState<SavedItem[]>([]);
+
+  useEffect(() => {
+    const sync = () => setItems(getSaved());
+    sync();
+    window.addEventListener("scientia:saved", sync);
+    return () => window.removeEventListener("scientia:saved", sync);
+  }, []);
+
+  return (
+    <main className="wrap narrow">
+      <h1 className="page-title">Saved</h1>
+
+      {items.length === 0 ? (
+        <div className="empty">
+          <p className="page-sub" style={{ margin: "0 auto 14px" }}>
+            Nothing saved yet. Tap "Save" on any story and it will wait for you here.
+          </p>
+          <Link href="/">Back to today</Link>
+        </div>
+      ) : (
+        <>
+          <p className="page-sub">
+            {items.length} saved {items.length === 1 ? "story" : "stories"}
+          </p>
+          {items.map((s) => (
+            <div key={s.slug} className="saved-row">
+              <div className="main">
+                <h2 style={{ fontFamily: "var(--serif)", fontWeight: 400, fontSize: 22, margin: "0 0 8px" }}>
+                  <Link href={`/article/${s.slug}/`}>{s.title}</Link>
+                </h2>
+                <p style={{ color: "var(--muted)", fontSize: 14.5, lineHeight: 1.7, margin: "0 0 8px" }}>{s.dek}</p>
+                <div className="meta">
+                  <span>
+                    {new Date(s.storyDate).toLocaleDateString("en-GB", {
+                      day: "numeric",
+                      month: "short",
+                      year: "numeric",
+                    })}
+                  </span>
+                  <span className="dot">·</span>
+                  <span>{s.readingMinutes} min read</span>
+                </div>
+              </div>
+              <button type="button" className="remove" onClick={() => removeSaved(s.slug)}>
+                Remove
+              </button>
+            </div>
+          ))}
+        </>
+      )}
+    </main>
+  );
+}
